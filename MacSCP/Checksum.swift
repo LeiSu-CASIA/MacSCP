@@ -1,0 +1,8 @@
+import Foundation
+enum StableChecksum {
+ static func local(_ path:String,checkpoint:(()throws->Void)?=nil)throws->String{let url=URL(fileURLWithPath:path);let before=try FileManager.default.attributesOfItem(atPath:path);guard before[.type] as? FileAttributeType == .typeRegular else{throw SFTPError.message("校验和仅支持普通文件，不跟随符号链接")};let hash=try TransferResume.digest(url,checkpoint:checkpoint);let after=try FileManager.default.attributesOfItem(atPath:path);guard before[.size] as? NSNumber == after[.size] as? NSNumber,before[.modificationDate] as? Date == after[.modificationDate] as? Date,before[.systemFileNumber] as? NSNumber == after[.systemFileNumber] as? NSNumber,after[.type] as? FileAttributeType == .typeRegular else{throw SFTPError.message("计算时文件发生变化，请重试")};return hash}
+}
+enum SyncChecksums {
+ static func local(_ snapshot:[String:SyncNode],root:String,paths:Set<String>?=nil,checkpoint:(()throws->Void)?=nil)throws->[String:SyncNode]{var result=snapshot;for path in snapshot.keys.sorted(){try checkpoint?();if snapshot[path]?.directory==false,paths?.contains(path) != false{result[path]?.checksum=try StableChecksum.local(URL(fileURLWithPath:root).appendingPathComponent(path).path,checkpoint:checkpoint)}};return result}
+ static func remote(_ snapshot:[String:SyncNode],root:String,client:RemoteFileClient,paths:Set<String>?=nil)throws->[String:SyncNode]{var result=snapshot;for path in snapshot.keys.sorted(){try client.checkpoint?();if snapshot[path]?.directory==false,paths?.contains(path) != false{result[path]?.checksum=try client.checksum((root=="/" ? "/" : root+"/")+path)}};return result}
+}

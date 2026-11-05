@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="xterm.css">
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#10151f}#terminal{position:absolute;inset:10px}</style>
+</head><body><div id="terminal"></div>
+<script src="xterm.js"></script><script src="addon-fit.js"></script>
+<script>
+'use strict';
+const terminal=new Terminal({cursorBlink:true,fontSize:13,fontFamily:'Menlo, monospace',scrollback:10000,theme:{background:'#10151f',foreground:'#dce5f3',cursor:'#70decb',selectionBackground:'#304b59'}});
+const fit=new FitAddon.FitAddon();terminal.loadAddon(fit);terminal.open(document.getElementById('terminal'));
+const bridge=window.webkit.messageHandlers.bridge;
+terminal.onData(data=>bridge.postMessage({type:'input',data}));
+terminal.onResize(({cols,rows})=>bridge.postMessage({type:'resize',cols,rows}));
+window.receive=base64=>{const decoded=atob(base64),bytes=new Uint8Array(decoded.length);for(let i=0;i<decoded.length;i++)bytes[i]=decoded.charCodeAt(i);terminal.write(bytes);};
+window.focusTerminal=()=>terminal.focus();
+const resize=()=>{if(document.documentElement.clientWidth>0&&document.documentElement.clientHeight>0)fit.fit();};
+new ResizeObserver(resize).observe(document.getElementById('terminal'));
+resize();bridge.postMessage({type:'ready'});terminal.focus();
+</script></body></html>
