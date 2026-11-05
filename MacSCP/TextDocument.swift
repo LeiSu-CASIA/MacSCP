@@ -1,0 +1,18 @@
+import Foundation
+enum TextEncoding:String {case utf8="UTF-8",utf8BOM="UTF-8 BOM",utf16LE="UTF-16 LE",utf16BE="UTF-16 BE"}
+struct EditableText {
+ let encoding:TextEncoding;let lineEnding:String;let text:String
+ static let maximumBytes:UInt64=8*1024*1024
+ static func decode(_ data:Data)throws->EditableText{guard data.count<=maximumBytes else{throw SFTPError.message("内置编辑器仅打开不超过 8 MiB 的文本文件")};let encoding:TextEncoding;let content:Data;let stringEncoding:String.Encoding
+ if data.starts(with:[0xff,0xfe]){encoding = .utf16LE;content=Data(data.dropFirst(2));stringEncoding = .utf16LittleEndian}else if data.starts(with:[0xfe,0xff]){encoding = .utf16BE;content=Data(data.dropFirst(2));stringEncoding = .utf16BigEndian}else if data.starts(with:[0xef,0xbb,0xbf]){encoding = .utf8BOM;content=Data(data.dropFirst(3));stringEncoding = .utf8}else{encoding = .utf8;content=data;stringEncoding = .utf8}
+ guard let text=String(data:content,encoding:stringEncoding),!text.contains("\0"),!text.unicodeScalars.contains(where:{$0.value<32 && ![9,10,13].contains($0.value)}) else{throw SFTPError.message("文件不是支持的文本编码（UTF-8 或带 BOM 的 UTF-16），或包含二进制数据")};let ending=text.contains("\r\n") ? "\r\n" : text.contains("\r") ? "\r" : "\n";return EditableText(encoding:encoding,lineEnding:ending,text:text)}
+ func encode(_ text:String)throws->Data{let normalized=text.replacingOccurrences(of:"\r\n",with:"\n").replacingOccurrences(of:"\r",with:"\n").replacingOccurrences(of:"\n",with:lineEnding);let encoding:String.Encoding;let prefix:Data;switch self.encoding{case .utf8:encoding = .utf8;prefix=Data();case .utf8BOM:encoding = .utf8;prefix=Data([0xef,0xbb,0xbf]);case .utf16LE:encoding = .utf16LittleEndian;prefix=Data([0xff,0xfe]);case .utf16BE:encoding = .utf16BigEndian;prefix=Data([0xfe,0xff])};guard let bytes=normalized.data(using:encoding,allowLossyConversion:false),bytes.count+prefix.count<=Self.maximumBytes else{throw SFTPError.message("文本无法编码或超过 8 MiB")};return prefix+bytes}
+}
+final class RemoteTextDocument {
+ let path:String;let content:EditableText;let workspace:URL;private var baseline:Data;private var mode:UInt32
+ init(path:String,client:RemoteFileClient)throws{self.path=path;guard let attrs=try client.attributes(path),attrs.mode&0o170000 == 0o100000,attrs.size<=EditableText.maximumBytes else{throw SFTPError.message("请选择不超过 8 MiB 的普通文本文件；不直接编辑目录或符号链接")};mode=attrs.mode&0o7777;workspace=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("MacSCP-Editor-"+UUID().uuidString);try FileManager.default.createDirectory(at:workspace,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700]);do{let local=workspace.appendingPathComponent("original");try client.download(path,to:local,maximumBytes:EditableText.maximumBytes);baseline=try Data(contentsOf:local);content=try EditableText.decode(baseline)}catch{try? FileManager.default.removeItem(at:workspace);throw error}}
+ deinit{try? FileManager.default.removeItem(at:workspace)}
+ func save(_ text:String,client:RemoteFileClient)throws{let bytes=try content.encode(text);let local=workspace.appendingPathComponent("edited");try bytes.write(to:local,options:.atomic)
+ func checkVersion()throws{guard let attrs=try client.attributes(path),attrs.mode&0o170000 == 0o100000,attrs.mode&0o7777==mode else{throw SFTPError.message("远程文件已被删除、替换或修改权限，请另存本地副本后重新打开")};let current=workspace.appendingPathComponent("current");try client.download(path,to:current,maximumBytes:EditableText.maximumBytes);guard try Data(contentsOf:current)==baseline else{throw SFTPError.message("远程内容已被其他操作修改，已停止保存。请另存本地副本并重新打开远程文件")}}
+ try checkVersion();try client.upload(local,to:path,overwrite:true,permissions:client.capabilities.contains(.permissions) ? mode : nil,beforeCommit:checkVersion);baseline=bytes}
+}

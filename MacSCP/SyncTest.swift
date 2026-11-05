@@ -1,0 +1,8 @@
+import Foundation
+@main struct SyncTests{
+ static func main()throws{let old=SyncNode(directory:false,size:10,modified:100),new=SyncNode(directory:false,size:20,modified:200),dir=SyncNode(directory:true,size:0,modified:0)
+ let plan=try SyncPlanner.plan(source:["new":new,"old":old,"folder":dir,"folder/file":new],target:["new":old,"old":new]);precondition(plan.count==2 && plan.contains{$0.relative=="new" && $0.replacing} && plan.contains{$0.relative=="folder" && $0.directory})
+ do{_ = try SyncPlanner.plan(source:["conflict":dir],target:["conflict":new]);fatalError("type conflict")}catch{}
+ let root=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};let f=root.appendingPathComponent("中文.txt");try Data("text".utf8).write(to:f);try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:1700000000)],ofItemAtPath:f.path);let c=try SFTPClient(command:"/usr/libexec/sftp-server",arguments:[]);defer{c.close()};let dst=root.appendingPathComponent("remote");try c.upload(f,to:dst.path);let attrs=try c.attributes(dst.path);precondition(attrs?.modified==1700000000);let download=root.appendingPathComponent("download");try c.download(dst.path,to:download);let v=try download.resourceValues(forKeys:[.contentModificationDateKey]);precondition(Int(v.contentModificationDate!.timeIntervalSince1970)==1700000000)
+ print("PASS: sync additions/newer-only updates, recursive directory grouping, type conflicts, upload/download timestamp preservation")}
+}
