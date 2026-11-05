@@ -1,0 +1,4 @@
+import Cocoa
+@main struct NativeSSHTests {
+ static func main()throws{NSApplication.shared.setActivationPolicy(.prohibited);let view=SSHOptionsView();let options=SSHOptions(jumpHost:"user@jump.example:2222",connectTimeout:19,keepAliveInterval:21,keepAliveCount:5,compression:true);view.load(options);let actual=try view.value();precondition(actual==options);for field in [view.jump,view.timeout,view.interval,view.count]{precondition(field.frame.height>=26 && field.frame.minY>=0 && field.frame.maxY<=view.bounds.height)};precondition(view.jump.frame.width>=300);view.timeout.stringValue="invalid";do{_ = try view.value();fatalError("must validate numeric input")}catch{};print("PASS: advanced SSH controls have visible frames, options populate/read correctly, numeric input errors handled; no test window shown")}
+}

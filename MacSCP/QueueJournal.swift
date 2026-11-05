@@ -1,0 +1,26 @@
+import Foundation
+import Darwin
+struct ResumeRecord:Codable {let source:String;let destination:String;let upload:Bool;let temporaryPath:String;let sourceDigest:String?;let remoteSignature:String?;var ftpPublication:FTPPublicationRecord?=nil}
+struct TransferRecord:Codable {
+ let id:UUID;let site:Session;let up:Bool;let source:String;let destination:String;let directory:Bool;let size:UInt64;let overwrite:Bool;let resumes:[ResumeRecord];let completed:[String];let created:[String];var policy:TransferPolicy?=nil;var queuePosition:Int?=nil;var plannedDirectories:[String]?=nil;var overrideSpeedLimit:UInt64?=nil
+ func validated()throws->TransferRecord{if let speed=overrideSpeedLimit,speed>1073741824{throw SFTPError.message("恢复记录的独立限速无效")};if let position=queuePosition,!(0...100000).contains(position){throw SFTPError.message("任务恢复顺序无效")};_ = try site.validated();_ = try (policy ?? TransferPolicy()).validated();func path(_ value:String)->Bool{value.hasPrefix("/") && !value.contains("\0") && !value.split(separator:"/").contains("..") && !value.split(separator:"/").contains(".")};guard path(source),path(destination),resumes.count<=100000 else{throw SFTPError.message("任务恢复记录的路径或数量无效")};func child(_ value:String,_ root:String)->Bool{path(value) && (value==root || directory && value.hasPrefix(root.hasSuffix("/") ? root : root+"/"))};guard completed.allSatisfy({child($0,destination)}),created.allSatisfy({child($0,destination)}),(plannedDirectories ?? []).count<=100000,(plannedDirectories ?? []).allSatisfy({child($0,destination)}) else{throw SFTPError.message("恢复记录含越界路径")};for r in resumes{guard r.upload==up,child(r.source,source),child(r.destination,destination) else{throw SFTPError.message("续传记录与任务不匹配")};let prefix=up ? r.destination+".macscp-resume-" : URL(fileURLWithPath:r.destination).deletingLastPathComponent().appendingPathComponent(".macscp-resume-").path;guard r.temporaryPath.hasPrefix(prefix),UUID(uuidString:String(r.temporaryPath.dropFirst(prefix.count))) != nil else{throw SFTPError.message("恢复记录的暂存路径无效")};if let publication=r.ftpPublication{guard r.upload else{throw SFTPError.message("FTP 发布记录必须属于上传")};try publication.validated();guard r.sourceDigest != nil,publication.staged==nil || publication.staged?.digest==r.sourceDigest else{throw SFTPError.message("FTP 发布记录缺少源校验")}};if let digest=r.sourceDigest{guard digest.count==64,digest.allSatisfy({$0.isHexDigit}) else{throw SFTPError.message("无效的源校验和")}}};return self}
+}
+final class QueueJournal {
+ let url:URL;private let lock=NSLock();private var records=[UUID:TransferRecord]();private var lastWrite=Date.distantPast;private var descriptor:Int32 = -1
+ init(url:URL)throws{self.url=url;try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true,attributes:[.posixPermissions:0o700]);descriptor=Darwin.open(url.path+".lock",O_CREAT|O_RDWR,0o600);guard descriptor>=0 else{throw SFTPError.message("无法创建任务恢复锁")};guard flock(descriptor,LOCK_EX|LOCK_NB)==0 else{Darwin.close(descriptor);descriptor = -1;throw SFTPError.message("另一应用实例正在管理任务恢复记录，本实例不会接管")};do{if FileManager.default.fileExists(atPath:url.path){let handle=try FileHandle(forReadingFrom:url);defer{try? handle.close()};let data=try handle.read(upToCount:32*1024*1024+1) ?? Data();guard data.count<=32*1024*1024 else{throw SFTPError.message("任务恢复文件过大")};let list=try JSONDecoder().decode([TransferRecord].self,from:data);guard list.count<=10000 else{throw SFTPError.message("恢复任务数超过限制")};for item in list{let valid=try item.validated();records[valid.id]=valid};normalizeOrder()}}catch{flock(descriptor,LOCK_UN);Darwin.close(descriptor);descriptor = -1;throw error}}
+ deinit{if descriptor>=0{flock(descriptor,LOCK_UN);Darwin.close(descriptor)}}
+ func list()->[TransferRecord]{lock.lock();defer{lock.unlock()};return orderedRecords()}
+ func save(_ record:TransferRecord,force:Bool=false)throws{var valid=try record.validated();lock.lock();defer{lock.unlock()};valid.queuePosition=records[valid.id]?.queuePosition ?? records.count;records[valid.id]=valid;if force || Date().timeIntervalSince(lastWrite)>=1{try persist()}}
+ func remove(_ id:UUID)throws{lock.lock();defer{lock.unlock()};records.removeValue(forKey:id);normalizeOrder();try persist()}
+ func flush()throws{lock.lock();defer{lock.unlock()};try persist()}
+ func reorder(_ ids:[UUID])throws{
+  lock.lock();defer{lock.unlock()}
+  var seen=Set<UUID>();let known=ids.filter{records[$0] != nil && seen.insert($0).inserted};let selected=Set(known);var iterator=known.makeIterator()
+  let order=orderedRecords().map{item -> UUID in selected.contains(item.id) ? iterator.next()! : item.id}
+  for (index,id) in order.enumerated(){records[id]?.queuePosition=index}
+  try persist()
+ }
+ private func orderedRecords()->[TransferRecord]{records.values.sorted{let a=$0.queuePosition ?? Int.max,b=$1.queuePosition ?? Int.max;return a==b ? $0.id.uuidString<$1.id.uuidString : a<b}}
+ private func normalizeOrder(){for (index,record) in orderedRecords().enumerated(){records[record.id]?.queuePosition=index}}
+ private func persist()throws{let data=try JSONEncoder().encode(orderedRecords());try data.write(to:url,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path);lastWrite=Date()}
+}
